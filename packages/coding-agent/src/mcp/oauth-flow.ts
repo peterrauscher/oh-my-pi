@@ -198,43 +198,35 @@ function staticClientIdFromConfig(config: MCPOAuthConfig): string | undefined {
 	}
 }
 
-/** Match https host+path, allowing default port `:443` and trailing slashes. */
-function matchesHttpsEndpoint(value: string | undefined, hostname: string, pathname: string): boolean {
+/**
+ * Figma remote MCP authorize/register URLs (`:443` and trailing `/` allowed).
+ * Their DCR path allowlists client_name and expects a fixed loopback redirect.
+ */
+function isFigmaMcpEndpoint(value: string | undefined): boolean {
 	if (!value) return false;
 	try {
 		const url = new URL(value);
-		if (url.protocol !== "https:" || url.hostname !== hostname) return false;
-		if (url.port !== "" && url.port !== "443") return false;
-		const normalize = (path: string) => path.replace(/\/+$/, "") || "/";
-		return normalize(url.pathname) === normalize(pathname);
+		if (url.protocol !== "https:" || (url.port !== "" && url.port !== "443")) return false;
+		const path = url.pathname.replace(/\/+$/, "") || "/";
+		return (
+			(url.hostname === "api.figma.com" && path === "/v1/oauth/mcp/register") ||
+			(url.hostname === "www.figma.com" && path === "/oauth/mcp")
+		);
 	} catch {
 		return false;
 	}
 }
 
-function isFigmaMcpRegistrationEndpoint(value: string | undefined): boolean {
-	return matchesHttpsEndpoint(value, "api.figma.com", "/v1/oauth/mcp/register");
-}
-
-function isFigmaMcpAuthorizationEndpoint(value: string | undefined): boolean {
-	return matchesHttpsEndpoint(value, "www.figma.com", "/oauth/mcp");
-}
-
-/** Figma catalog gate — only when no static client_id is already configured. */
-function usesFigmaMcpDcrCompatibility(config: MCPOAuthConfig): boolean {
-	if (staticClientIdFromConfig(config)) return false;
-	return (
-		isFigmaMcpRegistrationEndpoint(config.registrationUrl) || isFigmaMcpAuthorizationEndpoint(config.authorizationUrl)
-	);
-}
-
 function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOptions {
-	const useFigmaDefaults =
-		usesFigmaMcpDcrCompatibility(config) &&
+	// Apply Figma's fixed loopback only when the user hasn't overridden redirect
+	// settings and no static client_id is pinned (manual client config wins).
+	const figmaDefaults =
+		!staticClientIdFromConfig(config) &&
 		config.redirectUri === undefined &&
 		config.callbackPort === undefined &&
-		config.callbackPath === undefined;
-	const redirectUri = resolveRedirectUri(useFigmaDefaults ? FIGMA_MCP_REDIRECT_URI : config.redirectUri);
+		config.callbackPath === undefined &&
+		(isFigmaMcpEndpoint(config.registrationUrl) || isFigmaMcpEndpoint(config.authorizationUrl));
+	const redirectUri = resolveRedirectUri(figmaDefaults ? FIGMA_MCP_REDIRECT_URI : config.redirectUri);
 	validateRedirectConfig(config, redirectUri);
 	// When a client_id is already pinned (config-supplied or embedded in the
 	// authorization URL), it was registered against a specific redirect URI.
@@ -248,7 +240,7 @@ function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOption
 	// fallback remains safe for first-install DCR flows whose preferred port
 	// happens to be occupied. Figma is the exception: its catalog gate accepts
 	// only a fixed loopback URI, so that path cannot fall back to another port.
-	const allowPortFallback = !useFigmaDefaults && staticClientIdFromConfig(config) === undefined;
+	const allowPortFallback = !figmaDefaults && staticClientIdFromConfig(config) === undefined;
 	return {
 		preferredPort: resolveCallbackPort(config.callbackPort, redirectUri),
 		callbackPath: resolveCallbackPath(config.callbackPath, redirectUri),
@@ -614,7 +606,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 		try {
 			const registrationBody: Record<string, unknown> = {
-				client_name: isFigmaMcpRegistrationEndpoint(registrationEndpoint) ? FIGMA_MCP_CLIENT_NAME : "oh-my-pi",
+				client_name: isFigmaMcpEndpoint(registrationEndpoint) ? FIGMA_MCP_CLIENT_NAME : "oh-my-pi",
 				redirect_uris: [redirectUri],
 				grant_types: ["authorization_code", "refresh_token"],
 				response_types: ["code"],
