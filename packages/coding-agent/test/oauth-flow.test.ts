@@ -85,18 +85,20 @@ describe("mcp oauth flow", () => {
 		expect(authUrl.searchParams.get("state")).toBe("test-state");
 	});
 
-	it("uses Figma's catalog-compatible DCR identity and callback by default", async () => {
+	it("uses Figma's catalog-compatible DCR identity and fixed callback by default", async () => {
+		// Figma allowlists client_name during DCR and requires a fixed loopback
+		// redirect. Assert constructor defaults without binding a real port.
 		let registrationPayload: Record<string, unknown> | null = null;
-		let authorizationUrl = "";
-		const abort = new AbortController();
+		const registrationUrl = "https://api.figma.com:443/v1/oauth/mcp/register/";
 		const flow = new MCPOAuthFlow(
 			{
-				authorizationUrl: "https://www.figma.com/oauth/mcp",
+				authorizationUrl: "https://www.figma.com/oauth/mcp/",
 				tokenUrl: "https://api.figma.com/v1/oauth/token",
-				registrationUrl: "https://api.figma.com/v1/oauth/mcp/register",
+				registrationUrl,
 				scopes: "mcp:connect",
 				fetch: async (input, init) => {
-					expect(String(input)).toBe("https://api.figma.com/v1/oauth/mcp/register");
+					// Endpoint matching is tolerant; fetch still hits the configured URL.
+					expect(String(input)).toBe(registrationUrl);
 					registrationPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
 					return new Response(
 						JSON.stringify({ client_id: "registered-client-id", client_secret: "registered-client-secret" }),
@@ -104,17 +106,14 @@ describe("mcp oauth flow", () => {
 					);
 				},
 			},
-			{
-				signal: abort.signal,
-				onAuth: ({ url }) => {
-					authorizationUrl = url;
-					abort.abort();
-				},
-			},
+			{},
 		);
 
-		await expect(flow.login()).rejects.toThrow();
+		expect(flow.redirectUri).toBe("http://127.0.0.1:51160/");
+		expect(flow.preferredPort).toBe(51160);
+		expect(flow.allowPortFallback).toBe(false);
 
+		const { url } = await flow.generateAuthUrl("test-state", flow.redirectUri!);
 		expect(registrationPayload).toEqual(
 			expect.objectContaining({
 				client_name: "GitHub Copilot CLI",
@@ -122,7 +121,8 @@ describe("mcp oauth flow", () => {
 				scope: "mcp:connect",
 			}),
 		);
-		expect(new URL(authorizationUrl).searchParams.get("redirect_uri")).toBe("http://127.0.0.1:51160/");
+		expect(new URL(url).searchParams.get("redirect_uri")).toBe("http://127.0.0.1:51160/");
+		expect(new URL(url).searchParams.get("client_id")).toBe("registered-client-id");
 	});
 
 	it("includes discovered scopes in dynamic client registration", async () => {
